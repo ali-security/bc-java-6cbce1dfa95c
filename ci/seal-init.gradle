@@ -1,0 +1,27 @@
+// Seal CI init script, shared by .travis.yml (tests) and .github/workflows/seal-build.yml (jar).
+// Leaves upstream's compile and verification setup (error-prone, checkstyle, nohttp, jacoco) untouched.
+// Caps parallel test forks for the 2-CPU CI hosts, prints each test result plus a per-task summary
+// line, and adds pkix's CompositeKeyTest (not referenced by any AllTests suite, so the AllTest*
+// filter skips it).
+allprojects { p ->
+    p.afterEvaluate {
+        p.tasks.withType(Test).configureEach { t ->
+            t.maxParallelForks = 2
+            t.testLogging {
+                showStandardStreams = false
+                events 'passed', 'skipped', 'failed'
+                exceptionFormat 'full'
+            }
+            t.afterSuite { desc, result ->
+                if (desc.parent == null) {
+                    println("TEST SUMMARY ${t.path}: ${result.resultType} (${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped)")
+                }
+            }
+        }
+        if (p.path == ':pkix') {
+            p.tasks.named('test').configure { t ->
+                t.filter { includeTestsMatching 'org.bouncycastle.openssl.test.CompositeKeyTest' }
+            }
+        }
+    }
+}

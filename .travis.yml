@@ -1,3 +1,43 @@
 language: java
-jdk:
-  - openjdk8
+dist: jammy
+
+# Upstream's config was only `jdk: openjdk8` with Travis' default `./gradlew assemble` / `./gradlew check`,
+# which cannot configure this build: build.gradle throws unless BC_JDK8/11/17/21 point at JDK homes
+# (toolchains, auto-detect off), and Gradle 8.5 + the JDK 17/21 compile toolchains need JDK 17 to run.
+# The suite is split into four jobs to stay inside Travis' 50-minute job limit.
+env:
+  global:
+    - BC_JDK8=$HOME/jdk8u402-b06
+    - BC_JDK11=$HOME/jdk-11.0.22+7
+    - BC_JDK17=$HOME/jdk-17.0.10+7
+    - BC_JDK21=$HOME/jdk-21.0.2+13
+  jobs:
+    - SEAL_LEG=pkix TEST_TASKS=":util:test :pkix:test"
+    - SEAL_LEG=core TEST_TASKS=":core:test -PexcludeTests=org.bouncycastle.pqc.*"
+    - SEAL_LEG=prov TEST_TASKS=":prov:test"
+    - SEAL_LEG=tls-mail TEST_TASKS=":tls:test :mail:test :jmail:test"
+
+before_install:
+  - date +%s > $HOME/.seal-job-start
+  - curl -fsSL https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u402-b06/OpenJDK8U-jdk_x64_linux_hotspot_8u402b06.tar.gz | tar xz -C $HOME
+  - curl -fsSL https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.22%2B7/OpenJDK11U-jdk_x64_linux_hotspot_11.0.22_7.tar.gz | tar xz -C $HOME
+  - curl -fsSL https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.10%2B7/OpenJDK17U-jdk_x64_linux_hotspot_17.0.10_7.tar.gz | tar xz -C $HOME
+  - curl -fsSL https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.2%2B13/OpenJDK21U-jdk_x64_linux_hotspot_21.0.2_13.tar.gz | tar xz -C $HOME
+  # bc-test-data r1rv78v1 without the multi-GB pqc/ KATs (only pqc/composite is read outside the pqc
+  # test packages, which no leg runs): the 2 GB full-tag tarball download stalled Travis' log stream.
+  - git clone --quiet --depth 1 --branch r1rv78v1 --filter=blob:none --no-checkout https://github.com/bcgit/bc-test-data.git $TRAVIS_BUILD_DIR/../bc-test-data
+  - git -C $TRAVIS_BUILD_DIR/../bc-test-data sparse-checkout set --no-cone '/*' '!/pqc/*/' '/pqc/composite/'
+  - git -C $TRAVIS_BUILD_DIR/../bc-test-data checkout --quiet
+  - du -sh $TRAVIS_BUILD_DIR/../bc-test-data/* | sort -k2
+  - export JAVA_HOME=$BC_JDK17
+  - export PATH=$JAVA_HOME/bin:$PATH
+  - export JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF8
+  - java -version
+
+install: true
+
+script:
+  - ./gradlew --no-daemon --console=plain -s --init-script ci/seal-init.gradle $TEST_TASKS
+
+after_script:
+  - sh .travis/wait-for-log.sh "$SEAL_LEG"

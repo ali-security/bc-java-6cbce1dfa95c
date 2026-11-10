@@ -129,6 +129,8 @@ public class GOSTR3410_2012_256CmsSignVerifyDetached
 
                     params.addCertStore(certStoreBuilder.build());
                     params.setRevocationEnabled(false);
+                    // signer certificate is only valid 2024-02-07 .. 2025-02-07: validate the path at a date inside that window
+                    params.setDate(new java.util.Date(1717200000000L));
                     certPathBuilder.build(params);
                     result = true;
                 }

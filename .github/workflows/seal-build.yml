@@ -1,0 +1,43 @@
+name: seal-build
+
+# Pack-only: builds bcpkix-jdk15to18 with the project's own Ant script for the 1.5-1.8 range
+# (build1-5to1-8 -> ant/jdk15+.xml, source/target 1.5) on JDK 8u402, the JDK named in the public
+# jar's manifest (Originally-Created-By: 25.402-b06), and uploads the jar.
+# The test suite runs on Travis (.travis.yml).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8.0.402
+
+      - name: Install Ant 1.10.14
+        run: |
+          curl -fsSL https://archive.apache.org/dist/ant/binaries/apache-ant-1.10.14-bin.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-ant-1.10.14/bin" >> "$GITHUB_PATH"
+
+      - name: Build bcpkix-jdk15to18 jar
+        run: |
+          export JDKPATH="$JAVA_HOME"
+          export ANT_OPTS=-Xmx3g
+          java -version
+          ant -version
+          sh -e build1-5to1-8
+          ls -l build/artifacts/jdk1.5/jars
+          mkdir -p seal-dist
+          cp build/artifacts/jdk1.5/jars/bcpkix-jdk15to18-17801.jar seal-dist/bcpkix-jdk15to18-1.78.1.jar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bcpkix-jdk15to18-jar
+          path: seal-dist/bcpkix-jdk15to18-1.78.1.jar
+          if-no-files-found: error

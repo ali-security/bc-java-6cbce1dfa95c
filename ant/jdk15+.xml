@@ -74,6 +74,14 @@
             <fileset dir="mail/src/test/resources" includes="**/*.*" />
 
         </copy>
+        <!-- the jdk1.5 sources replace their src/main/java counterparts: copy them again with overwrite so
+             the replacement does not depend on which of two same-named files <copy> happened to write last -->
+        <copy todir="${src.dir}" overwrite="true">
+            <fileset dir="tls/src/main/jdk1.5" includes="**/*.java" />
+            <fileset dir="tls/src/test/jdk1.5" includes="**/*.java" />
+            <fileset dir="pkix/src/main/jdk1.5" includes="**/*.java" />
+            <fileset dir="pg/src/main/jdk1.5" includes="**/*.java" />
+        </copy>
         <available classname="com.puppycrawl.tools.checkstyle.CheckStyleTask" property="checkstyle.on" />
     </target>
 
