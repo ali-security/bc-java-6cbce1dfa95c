@@ -7,6 +7,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.SecureRandom;
 import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.util.Date;
@@ -14,9 +15,14 @@ import java.util.Date;
 import junit.framework.Test;
 import junit.framework.TestCase;
 import junit.framework.TestSuite;
+import org.bouncycastle.asn1.ASN1Encodable;
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.DERNull;
 import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.bc.BCObjectIdentifiers;
 import org.bouncycastle.asn1.cmp.CMPCertificate;
 import org.bouncycastle.asn1.cmp.CertConfirmContent;
 import org.bouncycastle.asn1.cmp.CertOrEncCert;
@@ -24,6 +30,7 @@ import org.bouncycastle.asn1.cmp.CertRepMessage;
 import org.bouncycastle.asn1.cmp.CertResponse;
 import org.bouncycastle.asn1.cmp.CertifiedKeyPair;
 import org.bouncycastle.asn1.cmp.PKIBody;
+import org.bouncycastle.asn1.cmp.PKIHeaderBuilder;
 import org.bouncycastle.asn1.cmp.PKIMessage;
 import org.bouncycastle.asn1.cmp.PKIStatus;
 import org.bouncycastle.asn1.cmp.PKIStatusInfo;
@@ -33,10 +40,14 @@ import org.bouncycastle.asn1.crmf.EncryptedKey;
 import org.bouncycastle.asn1.crmf.EncryptedValue;
 import org.bouncycastle.asn1.crmf.ProofOfPossession;
 import org.bouncycastle.asn1.crmf.SubsequentMessage;
+import org.bouncycastle.asn1.misc.MiscObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x9.X9ObjectIdentifiers;
 import org.bouncycastle.cert.CertException;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
@@ -56,7 +67,11 @@ import org.bouncycastle.cert.crmf.jcajce.JcePKMACValuesCalculator;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.cms.CMSAlgorithm;
+import org.bouncycastle.jcajce.CompositePrivateKey;
+import org.bouncycastle.jcajce.CompositePublicKey;
+import org.bouncycastle.jcajce.spec.CompositeAlgorithmSpec;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.jce.spec.ECNamedCurveGenParameterSpec;
 import org.bouncycastle.operator.AsymmetricKeyUnwrapper;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.ContentVerifierProvider;
@@ -428,5 +443,204 @@ public class AllTests
         {
             throw new RuntimeException(e.toString());
         }
+    }
+
+    public void testComposite()
+        throws Exception
+    {
+        // -- setup: a trusted composite ML-DSA-44/RSA keypair (stand-in for a CA / server key) --
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("MLDSA44-RSA2048-PKCS15-SHA256", BC);
+        kpg.initialize(null, new SecureRandom());
+        KeyPair kp = kpg.generateKeyPair();
+        PublicKey trustedKey = kp.getPublic();
+
+        ContentVerifierProvider verifier =
+            new JcaContentVerifierProviderBuilder().setProvider(BC).build(trustedKey);
+
+        GeneralName sender = new GeneralName(new X500Name("CN=attacker"));
+        GeneralName recip = new GeneralName(new X500Name("CN=victim"));
+        PKIBody body = new PKIBody(PKIBody.TYPE_CONFIRM, DERNull.INSTANCE);
+
+        // -- NORMAL: legitimately signed with the private key ----------------
+        ContentSigner signer =
+            new JcaContentSignerBuilder("MLDSA44-RSA2048-PKCS15-SHA256").setProvider(BC).build(kp.getPrivate());
+        ProtectedPKIMessage legit = new ProtectedPKIMessageBuilder(sender, recip)
+            .setMessageTime(new Date())
+            .setBody(body)
+            .build(signer);
+
+        assertTrue("legitimately signed composite message should verify", legit.verify(verifier));
+
+        // this is using the experimental composite construction.
+        // protectionAlg.algorithm  = 1.3.6.1.4.1.18227.2.1 (id_alg_composite)
+        // protectionAlg.parameters = SEQUENCE { AlgId(dilithium2, NULL), AlgId(sha256WithRSA, NULL) }
+        //   -> createCompositeVerifier builds sigs[] = { two real Signatures }
+        //     so the "no matching signature found" guard passes
+        // protection               = BIT STRING wrapping 30 00 (empty SEQ)
+        //   -> sigSeq.size()==0 -> loop body never runs -> verify() returns true
+        //
+        AlgorithmIdentifier innerAlg1 = new AlgorithmIdentifier(
+            BCObjectIdentifiers.dilithium2, DERNull.INSTANCE);
+        AlgorithmIdentifier innerAlg2 = new AlgorithmIdentifier(
+            PKCSObjectIdentifiers.sha256WithRSAEncryption, DERNull.INSTANCE);
+        AlgorithmIdentifier compositeAlg = new AlgorithmIdentifier(
+            MiscObjectIdentifiers.id_alg_composite,
+            new DERSequence(new ASN1Encodable[]{ innerAlg1, innerAlg2 }));
+
+        PKIHeaderBuilder fh = new PKIHeaderBuilder(2, sender, recip);
+        fh.setProtectionAlg(compositeAlg);
+        // Signature bytes: an empty DER SEQUENCE. Two bytes. No key needed.
+        DERBitString emptySigSeq = new DERBitString(
+            new DERSequence().getEncoded());
+
+        PKIMessage forged = new PKIMessage(fh.build(), body, emptySigSeq);
+        ProtectedPKIMessage forgedPM = new ProtectedPKIMessage(new GeneralPKIMessage(forged));
+        assertFalse("composite protection with an empty signature sequence must not verify", forgedPM.verify(verifier));
+    }
+
+    public void testForgedComposite()
+        throws Exception
+    {
+        // -- setup: a trusted RSA keypair (stand-in for a CA / server key) --
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", BC);
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        PublicKey trustedKey = kp.getPublic();
+
+        ContentVerifierProvider verifier =
+            new JcaContentVerifierProviderBuilder().setProvider(BC).build(trustedKey);
+
+        GeneralName sender = new GeneralName(new X500Name("CN=attacker"));
+        GeneralName recip = new GeneralName(new X500Name("CN=victim"));
+        PKIBody body = new PKIBody(PKIBody.TYPE_CONFIRM, DERNull.INSTANCE);
+
+        // -- NORMAL: legitimately signed with the private key ----------------
+        ContentSigner signer =
+            new JcaContentSignerBuilder("SHA256withRSA").setProvider(BC).build(kp.getPrivate());
+        ProtectedPKIMessage legit = new ProtectedPKIMessageBuilder(sender, recip)
+            .setMessageTime(new Date())
+            .setBody(body)
+            .build(signer);
+
+        assertTrue("legitimately signed message should verify", legit.verify(verifier));
+
+        // protectionAlg.algorithm  = 1.3.6.1.4.1.18227.2.1 (id_alg_composite)
+        // protectionAlg.parameters = SEQUENCE { AlgId(sha256WithRSA, NULL) }
+        //   -> createCompositeVerifier builds sigs[] = { one real Signature }
+        //     so the "no matching signature found" guard passes
+        // protection               = BIT STRING wrapping 30 00 (empty SEQ)
+        //   -> sigSeq.size()==0 -> loop body never runs -> verify() returns true
+        //
+        AlgorithmIdentifier innerAlg = new AlgorithmIdentifier(
+            PKCSObjectIdentifiers.sha256WithRSAEncryption, DERNull.INSTANCE);
+        AlgorithmIdentifier compositeAlg = new AlgorithmIdentifier(
+            MiscObjectIdentifiers.id_alg_composite,
+            new DERSequence(innerAlg));
+
+        PKIHeaderBuilder fh = new PKIHeaderBuilder(2, sender, recip);
+        fh.setProtectionAlg(compositeAlg);
+        // Signature bytes: an empty DER SEQUENCE. Two bytes. No key needed.
+        DERBitString emptySigSeq = new DERBitString(
+            new DERSequence().getEncoded());
+
+        PKIMessage forged = new PKIMessage(fh.build(), body, emptySigSeq);
+        ProtectedPKIMessage forgedPM = new ProtectedPKIMessage(new GeneralPKIMessage(forged));
+
+        assertFalse("forged composite protection with an empty signature sequence must not verify", forgedPM.verify(verifier));
+    }
+
+    public void testForgedCompositeUncheckedComponent()
+        throws Exception
+    {
+        // a trusted plain RSA key: an ECDSA component listed first in the composite
+        // AlgorithmIdentifier cannot be set up for it (sigs[0] == null), so a
+        // one-element signature sequence only ever reaches that null slot and
+        // nothing at all is checked against the key.
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", BC);
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        ContentVerifierProvider verifier =
+            new JcaContentVerifierProviderBuilder().setProvider(BC).build(kp.getPublic());
+
+        GeneralName sender = new GeneralName(new X500Name("CN=attacker"));
+        GeneralName recip = new GeneralName(new X500Name("CN=victim"));
+        PKIBody body = new PKIBody(PKIBody.TYPE_CONFIRM, DERNull.INSTANCE);
+
+        AlgorithmIdentifier innerAlg1 = new AlgorithmIdentifier(X9ObjectIdentifiers.ecdsa_with_SHA256);
+        AlgorithmIdentifier innerAlg2 = new AlgorithmIdentifier(
+            PKCSObjectIdentifiers.sha256WithRSAEncryption, DERNull.INSTANCE);
+        AlgorithmIdentifier compositeAlg = new AlgorithmIdentifier(
+            MiscObjectIdentifiers.id_alg_composite,
+            new DERSequence(new ASN1Encodable[]{ innerAlg1, innerAlg2 }));
+
+        PKIHeaderBuilder fh = new PKIHeaderBuilder(2, sender, recip);
+        fh.setProtectionAlg(compositeAlg);
+        // Signature bytes: a SEQUENCE holding a single junk BIT STRING. No key needed.
+        DERBitString junkSigSeq = new DERBitString(
+            new DERSequence(new DERBitString(new byte[64])).getEncoded());
+
+        PKIMessage forged = new PKIMessage(fh.build(), body, junkSigSeq);
+        ProtectedPKIMessage forgedPM = new ProtectedPKIMessage(new GeneralPKIMessage(forged));
+
+        assertFalse("composite protection whose components are never checked must not verify", forgedPM.verify(verifier));
+    }
+
+    public void testCompositeProtectionStripping()
+        throws Exception
+    {
+        // a legacy id_alg_composite protection must carry exactly one component for
+        // every component key: one stripped down to its verifying ECDSA prefix, or one
+        // padded with a surplus component, must not verify.
+        KeyPairGenerator ecKpg = KeyPairGenerator.getInstance("EC", BC);
+        ecKpg.initialize(new ECNamedCurveGenParameterSpec("P-256"), new SecureRandom());
+        KeyPair ecKp = ecKpg.generateKeyPair();
+
+        KeyPairGenerator rsaKpg = KeyPairGenerator.getInstance("RSA", BC);
+        rsaKpg.initialize(2048, new SecureRandom());
+        KeyPair rsaKp = rsaKpg.generateKeyPair();
+
+        // component 0 = ECDSA, component 1 = RSA
+        CompositeAlgorithmSpec compAlgSpec = new CompositeAlgorithmSpec.Builder()
+            .add("SHA256withECDSA")
+            .add("SHA256withRSA")
+            .build();
+        CompositePublicKey compPub = new CompositePublicKey(ecKp.getPublic(), rsaKp.getPublic());
+        CompositePrivateKey compPriv = new CompositePrivateKey(ecKp.getPrivate(), rsaKp.getPrivate());
+
+        ContentVerifierProvider verifier =
+            new JcaContentVerifierProviderBuilder().setProvider(BC).build(compPub);
+
+        GeneralName sender = new GeneralName(new X500Name("CN=Sender"));
+        GeneralName recip = new GeneralName(new X500Name("CN=Recip"));
+
+        ContentSigner signer =
+            new JcaContentSignerBuilder("Composite", compAlgSpec).setProvider(BC).build(compPriv);
+        ProtectedPKIMessage legit = new ProtectedPKIMessageBuilder(sender, recip)
+            .setMessageTime(new Date())
+            .setBody(new PKIBody(PKIBody.TYPE_CONFIRM, DERNull.INSTANCE))
+            .build(signer);
+
+        assertTrue("genuine composite protection should verify", legit.verify(verifier));
+
+        PKIMessage legitMsg = legit.toASN1Structure();
+        ASN1Sequence sigSeq = ASN1Sequence.getInstance(legitMsg.getProtection().getOctets());
+        assertEquals("expected a two-component composite protection", 2, sigSeq.size());
+
+        // strip the RSA component, leaving only the (genuine) ECDSA component
+        DERBitString stripped = new DERBitString(
+            new DERSequence(sigSeq.getObjectAt(0)).getEncoded());
+        ProtectedPKIMessage strippedPM = new ProtectedPKIMessage(new GeneralPKIMessage(
+            new PKIMessage(legitMsg.getHeader(), legitMsg.getBody(), stripped)));
+
+        assertFalse("composite protection stripped of a component must not verify", strippedPM.verify(verifier));
+
+        // keep both genuine components but append a surplus one
+        DERBitString padded = new DERBitString(
+            new DERSequence(new ASN1Encodable[]{ sigSeq.getObjectAt(0), sigSeq.getObjectAt(1), sigSeq.getObjectAt(1) }).getEncoded());
+        ProtectedPKIMessage paddedPM = new ProtectedPKIMessage(new GeneralPKIMessage(
+            new PKIMessage(legitMsg.getHeader(), legitMsg.getBody(), padded)));
+
+        assertFalse("composite protection with a surplus component must not verify", paddedPM.verify(verifier));
     }
 }
